@@ -95,9 +95,10 @@ var g_bounds = bytes.new(32)         // min xyz, max xyz
 // Positions as read from the file, before any morph. Morphs are applied FROM
 // this, never accumulated onto the live buffer, so weights can go up and down.
 var g_base = bytes.new(16777216)
-// Per flattened primitive: the mesh it came from, its first vertex, its vertex
-// count, and how many morph targets it has. 16 bytes each.
-var g_prim_info = bytes.new(16384)
+// Per flattened primitive, 32 bytes each:
+//   0 mesh  1 first_vertex  2 vertex_count  3 target_count
+//   4 first_index  5 index_count  6 material  7 base-colour image (-1 = none)
+var g_prim_info = bytes.new(32768)
 // Per (primitive, target): the POSITION-delta accessor index, and the weight.
 var g_target_acc = bytes.new(524288)   // MAX_PRIMS * MAX_TARGETS * 4
 var g_target_w = bytes.new(524288)
@@ -366,7 +367,7 @@ fn index_document(doc: Bytes, jstart: Int, jend: Int) -> Int = {
                     // The owning mesh: VRM 0.x expression binds name a MESH and
                     // a target index, and a mesh becomes several flattened
                     // primitives when it is split by material.
-                    bytes.set_i32_le(g_prim_info, n_prim * 16, n_mesh)
+                    bytes.set_i32_le(g_prim_info, n_prim * 32, n_mesh)
                     n_prim = n_prim + 1
                     let after = skip_value(doc, r, jend)
                     var d = skip_ws(doc, after, jend)
@@ -592,6 +593,7 @@ fn append_primitive(p: Int) -> Int = {
           }
           bytes.set_i32_le(g_geo, 0, base_v + n)
           bytes.set_i32_le(g_geo, 4, base_i + n)
+          record_primitive(p, base_v, n, base_i, n)
           n
         }
       }
@@ -610,7 +612,7 @@ fn append_primitive(p: Int) -> Int = {
           }
           bytes.set_i32_le(g_geo, 0, base_v + n)
           bytes.set_i32_le(g_geo, 4, base_i + ic)
-          record_primitive(p, base_v, n)
+          record_primitive(p, base_v, n, base_i, ic)
           n
         }
       }
@@ -620,9 +622,13 @@ fn append_primitive(p: Int) -> Int = {
 
 /// Note where a primitive landed and what morph targets it carries, and keep a
 /// copy of its positions to morph FROM.
-fn record_primitive(p: Int, first: Int, n: Int) -> Unit = {
+fn record_primitive(p: Int, first: Int, n: Int, first_index: Int, index_count: Int) -> Unit = {
   set_prim_info(p, 1, first)
   set_prim_info(p, 2, n)
+  set_prim_info(p, 4, first_index)
+  set_prim_info(p, 5, index_count)
+  set_prim_info(p, 6, primitive_material(p))
+  set_prim_info(p, 7, primitive_base_color_image(p))
 
   // ONE in-place write per loop body. The second and later mutator of the same
   // Bytes inside a loop costs O(buffer size) each (almide/almide#946), so three
@@ -726,8 +732,8 @@ pub fn built_index_at(i: Int) -> Int =
 // `bytes.copy_from` in one body: that costs O(destination) per call
 // (almide/almide#946) and would put a 16 MiB copy inside a per-vertex loop.
 
-fn prim_info(p: Int, k: Int) -> Int = bytes.read_i32_le(g_prim_info, p * 16 + k * 4)
-fn set_prim_info(p: Int, k: Int, v: Int) -> Unit = bytes.set_i32_le(g_prim_info, p * 16 + k * 4, v)
+fn prim_info(p: Int, k: Int) -> Int = bytes.read_i32_le(g_prim_info, p * 32 + k * 4)
+fn set_prim_info(p: Int, k: Int, v: Int) -> Unit = bytes.set_i32_le(g_prim_info, p * 32 + k * 4, v)
 
 pub fn primitive_mesh(p: Int) -> Int = prim_info(p, 0)
 pub fn primitive_first_vertex(p: Int) -> Int = prim_info(p, 1)
@@ -990,3 +996,137 @@ pub fn set_expression(i: Int, w: Float) -> Unit =
 // by name (the #881 ABI), so no wrapper block is needed — and adding one is a
 // duplicate-export error. A consumer that IMPORTS this package sees none of
 // them exported and declares its own surface.
+
+// ── Materials and images ─────────────────────────────────────────────────
+//
+// A primitive names a material, a material names a texture, a texture names an
+// image, and an image is a byte range in the BIN chunk. Reading its width and
+// height from the encoded header is file parsing, so it belongs here — a
+// consumer needs the size to create a texture BEFORE an async decode can fill
+// it, and swapping the texture afterwards would orphan its bind groups.
+
+pub fn primitive_first_index(p: Int) -> Int = prim_info(p, 4)
+pub fn primitive_index_count(p: Int) -> Int = prim_info(p, 5)
+pub fn primitive_material(p: Int) -> Int = {
+  let jend = count_at(3) + count_at(4)
+  let prim = primitive_at(p)
+  if prim < 0 then 0 - 1 else int_field(g_file, prim, jend, "material", 0 - 1)
+}
+
+/// The image index behind a primitive's base colour texture, or -1.
+pub fn primitive_base_color_image(p: Int) -> Int = {
+  let jend = count_at(3) + count_at(4)
+  let jstart = count_at(3)
+  let m = primitive_material(p)
+  if m < 0 then 0 - 1
+  else {
+    let mats = field(g_file, jstart, jend, "materials")
+    let mat = if mats < 0 then 0 - 1 else elem(g_file, mats, m, jend)
+    if mat < 0 then 0 - 1
+    else {
+      let pbr = field(g_file, mat, jend, "pbrMetallicRoughness")
+      let bct = if pbr < 0 then 0 - 1 else field(g_file, pbr, jend, "baseColorTexture")
+      let ti = if bct < 0 then 0 - 1 else int_field(g_file, bct, jend, "index", 0 - 1)
+      if ti < 0 then 0 - 1
+      else {
+        let texs = field(g_file, jstart, jend, "textures")
+        let tex = if texs < 0 then 0 - 1 else elem(g_file, texs, ti, jend)
+        if tex < 0 then 0 - 1 else int_field(g_file, tex, jend, "source", 0 - 1)
+      }
+    }
+  }
+}
+
+pub fn primitive_image(p: Int) -> Int = prim_info(p, 7)
+
+pub fn image_count() -> Int = {
+  let jstart = count_at(3)
+  let jend = jstart + count_at(4)
+  let imgs = field(g_file, jstart, jend, "images")
+  if imgs < 0 then 0
+  else {
+    var n = 0
+    var more = true
+    while more and n < 4096 {
+      if elem(g_file, imgs, n, jend) < 0 then { more = false } else { n = n + 1 }
+    }
+    n
+  }
+}
+
+fn image_view(i: Int) -> Int = {
+  let jstart = count_at(3)
+  let jend = jstart + count_at(4)
+  let imgs = field(g_file, jstart, jend, "images")
+  if imgs < 0 then 0 - 1
+  else {
+    let img = elem(g_file, imgs, i, jend)
+    if img < 0 then 0 - 1 else int_field(g_file, img, jend, "bufferView", 0 - 1)
+  }
+}
+
+/// Absolute byte offset of image `i`'s encoded bytes, or -1.
+pub fn image_ptr_offset(i: Int) -> Int = {
+  let jend = count_at(3) + count_at(4)
+  let bv = image_view(i)
+  if bv < 0 then 0 - 1
+  else {
+    let v = view_at(bv)
+    if v < 0 then 0 - 1 else count_at(5) + int_field(g_file, v, jend, "byteOffset", 0)
+  }
+}
+
+pub fn image_byte_length(i: Int) -> Int = {
+  let jend = count_at(3) + count_at(4)
+  let bv = image_view(i)
+  if bv < 0 then 0
+  else {
+    let v = view_at(bv)
+    if v < 0 then 0 else int_field(g_file, v, jend, "byteLength", 0)
+  }
+}
+
+/// A pointer into linear memory at image `i`'s first encoded byte.
+pub fn image_ptr(i: Int) -> Int = {
+  let off = image_ptr_offset(i)
+  if off < 0 then 0 else bytes.data_ptr(g_file) + off
+}
+
+fn be16(off: Int) -> Int = bytes.read_u8(g_file, off) * 256 + bytes.read_u8(g_file, off + 1)
+fn be32(off: Int) -> Int = be16(off) * 65536 + be16(off + 2)
+
+/// Width and height read from the encoded header — PNG's IHDR, or JPEG's first
+/// start-of-frame marker. Returns 0 for anything else.
+pub fn image_width(i: Int) -> Int = image_dim(i, 0)
+pub fn image_height(i: Int) -> Int = image_dim(i, 1)
+
+fn image_dim(i: Int, which: Int) -> Int = {
+  let off = image_ptr_offset(i)
+  let len = image_byte_length(i)
+  if off < 0 or len < 24 then 0
+  else if bytes.read_u8(g_file, off) == 137 and bytes.read_u8(g_file, off + 1) == 80 then {
+    // PNG: 8-byte signature, then the IHDR chunk's length and type, then w, h.
+    if which == 0 then be32(off + 16) else be32(off + 20)
+  }
+  else if bytes.read_u8(g_file, off) == 255 and bytes.read_u8(g_file, off + 1) == 216 then {
+    // JPEG: walk the marker segments to the first SOF, which carries the size.
+    var q = off + 2
+    var found = 0
+    var done = false
+    while not done and q + 9 < off + len {
+      if bytes.read_u8(g_file, q) != 255 then { q = q + 1 }
+      else {
+        let m = bytes.read_u8(g_file, q + 1)
+        // SOF0..SOF3 and SOF5..SOF15, skipping the non-frame markers in between.
+        if (m >= 192 and m <= 195) or (m >= 197 and m <= 207 and m != 200 and m != 204) then {
+          found = if which == 0 then be16(q + 7) else be16(q + 5)
+          done = true
+        }
+        else if m == 216 or m == 1 or (m >= 208 and m <= 215) then { q = q + 2 }
+        else { q = q + 2 + be16(q + 2) }
+      }
+    }
+    found
+  }
+  else 0
+}
