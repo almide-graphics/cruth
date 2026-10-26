@@ -80,35 +80,35 @@ let MAX_BINDS = 16
 // ── Arenas ───────────────────────────────────────────────────────────────
 
 // Byte offsets (into the JSON chunk) of each indexed element, plus counts.
-var g_acc_at = bytes.new(16384)      // MAX_ACCESSORS * 4
-var g_view_at = bytes.new(16384)
-var g_prim_at = bytes.new(4096)      // MAX_PRIMS * 4
+var g_acc_at = bytes.zeros(16384)      // MAX_ACCESSORS * 4
+var g_view_at = bytes.zeros(16384)
+var g_prim_at = bytes.zeros(4096)      // MAX_PRIMS * 4
 // The file itself, staged by the host. Sized for the models this targets; a
 // larger one is rejected rather than truncated.
-var g_file = bytes.new(33554432)
+var g_file = bytes.zeros(33554432)
 // Built geometry, in the mesh pipeline's layout. Indices are u32 because a
 // whole model concatenated into one buffer passes 65535 vertices easily.
-var g_vtx = bytes.new(16777216)      // 512k vertices * 32B
-var g_idx = bytes.new(8388608)       // 2M indices * 4B
-var g_geo = bytes.new(16)            // [vertex_count][index_count]
-var g_bounds = bytes.new(32)         // min xyz, max xyz
+var g_vtx = bytes.zeros(16777216)      // 512k vertices * 32B
+var g_idx = bytes.zeros(8388608)       // 2M indices * 4B
+var g_geo = bytes.zeros(16)            // [vertex_count][index_count]
+var g_bounds = bytes.zeros(32)         // min xyz, max xyz
 // Positions as read from the file, before any morph. Morphs are applied FROM
 // this, never accumulated onto the live buffer, so weights can go up and down.
-var g_base = bytes.new(16777216)
+var g_base = bytes.zeros(16777216)
 // Per flattened primitive, 32 bytes each:
 //   0 mesh  1 first_vertex  2 vertex_count  3 target_count
 //   4 first_index  5 index_count  6 material  7 base-colour image (-1 = none)
-var g_prim_info = bytes.new(32768)
+var g_prim_info = bytes.zeros(32768)
 // Per (primitive, target): the POSITION-delta accessor index, and the weight.
-var g_target_acc = bytes.new(524288)   // MAX_PRIMS * MAX_TARGETS * 4
-var g_target_w = bytes.new(524288)
+var g_target_acc = bytes.zeros(524288)   // MAX_PRIMS * MAX_TARGETS * 4
+var g_target_w = bytes.zeros(524288)
 // Per expression: [preset_code][bind_count], then MAX_BINDS x [mesh][target][weight_pct].
-var g_expr = bytes.new(16384)
-var g_expr_n = bytes.new(4)
-var g_counts = bytes.new(32)         // [n_acc][n_view][n_prim][json_off][json_len][bin_off][bin_len][err]
+var g_expr = bytes.zeros(16384)
+var g_expr_n = bytes.zeros(4)
+var g_counts = bytes.zeros(32)         // [n_acc][n_view][n_prim][json_off][json_len][bin_off][bin_len][err]
 
-fn count_at(i: Int) -> Int = bytes.read_i32_le(g_counts, i * 4)
-fn set_count(i: Int, v: Int) -> Unit = bytes.set_i32_le(g_counts, i * 4, v)
+fn count_at(i: Int) -> Int = bytes.get_i32_le(g_counts, i * 4) ?? 0
+fn set_count(i: Int, v: Int) -> Unit = bytes.put_i32_le(g_counts, i * 4, v)
 
 pub fn accessor_count() -> Int = count_at(0)
 pub fn view_count() -> Int = count_at(1)
@@ -137,7 +137,7 @@ fn is_ws(b: Int) -> Bool = b == 32 or b == 9 or b == 10 or b == 13
 
 pub fn skip_ws(doc: Bytes, p: Int, end: Int) -> Int = {
   var q = p
-  while q < end and is_ws(bytes.read_u8(doc, q)) { q = q + 1 }
+  while q < end and is_ws(bytes.get(doc, q) ?? 0) { q = q + 1 }
   q
 }
 
@@ -148,7 +148,7 @@ pub fn skip_string(doc: Bytes, p: Int, end: Int) -> Int = {
   var q = p + 1
   var done = false
   while q < end and not done {
-    let b = bytes.read_u8(doc, q)
+    let b = bytes.get(doc, q) ?? 0
     if b == BACKSLASH then { q = q + 2 }
     else if b == QUOTE then { q = q + 1  done = true }
     else { q = q + 1 }
@@ -162,7 +162,7 @@ pub fn skip_value(doc: Bytes, p: Int, end: Int) -> Int = {
   let q = skip_ws(doc, p, end)
   if q >= end then q
   else {
-    let b = bytes.read_u8(doc, q)
+    let b = bytes.get(doc, q) ?? 0
     if b == QUOTE then skip_string(doc, q, end)
     else if b == LBRACE or b == LBRACKET then skip_nested(doc, q, end)
     else {
@@ -170,7 +170,7 @@ pub fn skip_value(doc: Bytes, p: Int, end: Int) -> Int = {
       var s = q
       var stop = 0 - 1
       while s < end and stop < 0 {
-        let c = bytes.read_u8(doc, s)
+        let c = bytes.get(doc, s) ?? 0
         if c == COMMA or c == RBRACE or c == RBRACKET or is_ws(c) then { stop = s }
         else { s = s + 1 }
       }
@@ -186,7 +186,7 @@ fn skip_nested(doc: Bytes, p: Int, end: Int) -> Int = {
   var depth = 0
   var done = false
   while q < end and not done {
-    let b = bytes.read_u8(doc, q)
+    let b = bytes.get(doc, q) ?? 0
     if b == QUOTE then { q = skip_string(doc, q, end) }
     else {
       if b == LBRACE or b == LBRACKET then { depth = depth + 1 }
@@ -209,26 +209,26 @@ fn string_is(doc: Bytes, p: Int, end: Int, k: String) -> Bool = {
 /// The position of the VALUE for `key` in the object starting at `p`, or -1.
 pub fn field(doc: Bytes, p: Int, end: Int, key: String) -> Int = {
   var q = skip_ws(doc, p, end)
-  if q >= end or bytes.read_u8(doc, q) != LBRACE then 0 - 1
+  if q >= end or (bytes.get(doc, q) ?? 0) != LBRACE then 0 - 1
   else {
     q = skip_ws(doc, q + 1, end)
     var found = 0 - 1
     var done = false
     while not done and q < end and found < 0 {
-      let b = bytes.read_u8(doc, q)
+      let b = bytes.get(doc, q) ?? 0
       if b == RBRACE then { done = true }
       else if b != QUOTE then { done = true }
       else {
         let hit = string_is(doc, q, end, key)
         let after_key = skip_string(doc, q, end)
         var c = skip_ws(doc, after_key, end)
-        if c < end and bytes.read_u8(doc, c) == COLON then { c = c + 1 } else {}
+        if c < end and bytes.get(doc, c) ?? 0 == COLON then { c = c + 1 } else {}
         let vpos = skip_ws(doc, c, end)
         if hit then { found = vpos }
         else {
           let after_val = skip_value(doc, vpos, end)
           var d = skip_ws(doc, after_val, end)
-          if d < end and bytes.read_u8(doc, d) == COMMA then { d = d + 1 } else {}
+          if d < end and bytes.get(doc, d) ?? 0 == COMMA then { d = d + 1 } else {}
           q = skip_ws(doc, d, end)
         }
       }
@@ -244,12 +244,12 @@ pub fn int_at(doc: Bytes, p: Int, end: Int, dflt: Int) -> Int = {
   else {
     var q = p
     var neg = false
-    if bytes.read_u8(doc, q) == MINUS then { neg = true  q = q + 1 } else {}
+    if bytes.get(doc, q) ?? 0 == MINUS then { neg = true  q = q + 1 } else {}
     var acc = 0
     var any = false
     var done = false
     while q < end and not done {
-      let b = bytes.read_u8(doc, q)
+      let b = bytes.get(doc, q) ?? 0
       if b >= DIGIT0 and b <= DIGIT9 then { acc = acc * 10 + (b - DIGIT0)  any = true  q = q + 1 }
       else { done = true }
     }
@@ -265,22 +265,22 @@ pub fn int_field(doc: Bytes, p: Int, end: Int, key: String, dflt: Int) -> Int =
 /// returning how many were recorded (or -1 if the arena is too small).
 fn index_array(doc: Bytes, p: Int, end: Int, slots: Bytes, cap: Int) -> Int = {
   var q = skip_ws(doc, p, end)
-  if q >= end or bytes.read_u8(doc, q) != LBRACKET then 0
+  if q >= end or (bytes.get(doc, q) ?? 0) != LBRACKET then 0
   else {
     q = skip_ws(doc, q + 1, end)
     var n = 0
     var done = false
     var overflow = false
     while not done and q < end {
-      let b = bytes.read_u8(doc, q)
+      let b = bytes.get(doc, q) ?? 0
       if b == RBRACKET then { done = true }
       else if n >= cap then { done = true  overflow = true }
       else {
-        bytes.set_i32_le(slots, n * 4, q)
+        bytes.put_i32_le(slots, n * 4, q)
         n = n + 1
         let after = skip_value(doc, q, end)
         var d = skip_ws(doc, after, end)
-        if d < end and bytes.read_u8(doc, d) == COMMA then { d = d + 1 } else {}
+        if d < end and bytes.get(doc, d) ?? 0 == COMMA then { d = d + 1 } else {}
         q = skip_ws(doc, d, end)
       }
     }
@@ -298,9 +298,9 @@ pub fn open_glb(data: Bytes, total: Int) -> Int = {
   set_count(0, 0)  set_count(1, 0)  set_count(2, 0)
 
   if total < 20 then { set_count(7, ERR_TOO_SMALL)  0 - 1 }
-  else if bytes.read_u32_le(data, 0) != GLB_MAGIC then { set_count(7, ERR_BAD_MAGIC)  0 - 1 }
+  else if (bytes.get_u32_le(data, 0) ?? 0) != GLB_MAGIC then { set_count(7, ERR_BAD_MAGIC)  0 - 1 }
   else {
-    let declared = bytes.read_u32_le(data, 8)
+    let declared = bytes.get_u32_le(data, 8) ?? 0
     let limit = if declared < total then declared else total
     var off = 12
     var json_off = 0 - 1
@@ -308,8 +308,8 @@ pub fn open_glb(data: Bytes, total: Int) -> Int = {
     var bin_off = 0 - 1
     var bin_len = 0
     while off + 8 <= limit {
-      let clen = bytes.read_u32_le(data, off)
-      let ctype = bytes.read_u32_le(data, off + 4)
+      let clen = bytes.get_u32_le(data, off) ?? 0
+      let ctype = bytes.get_u32_le(data, off + 4) ?? 0
       let body = off + 8
       let stop = if body + clen < limit then body + clen else limit
       if ctype == CHUNK_JSON and json_off < 0 then { json_off = body  json_len = stop - body }
@@ -345,33 +345,33 @@ fn index_document(doc: Bytes, jstart: Int, jend: Int) -> Int = {
     if meshes < 0 then {}
     else {
       var q = skip_ws(doc, meshes, jend)
-      if q < jend and bytes.read_u8(doc, q) == LBRACKET then {
+      if q < jend and bytes.get(doc, q) ?? 0 == LBRACKET then {
         q = skip_ws(doc, q + 1, jend)
         var done = false
         while not done and q < jend {
-          let b = bytes.read_u8(doc, q)
+          let b = bytes.get(doc, q) ?? 0
           if b == RBRACKET then { done = true }
           else {
             let prims = field(doc, q, jend, "primitives")
             if prims >= 0 then {
               var r = skip_ws(doc, prims, jend)
-              if r < jend and bytes.read_u8(doc, r) == LBRACKET then {
+              if r < jend and bytes.get(doc, r) ?? 0 == LBRACKET then {
                 r = skip_ws(doc, r + 1, jend)
                 var pdone = false
                 while not pdone and r < jend {
-                  let c = bytes.read_u8(doc, r)
+                  let c = bytes.get(doc, r) ?? 0
                   if c == RBRACKET then { pdone = true }
                   else if n_prim >= MAX_PRIMS then { pdone = true  done = true  set_count(7, ERR_INDEX_FULL) }
                   else {
-                    bytes.set_i32_le(g_prim_at, n_prim * 4, r)
+                    bytes.put_i32_le(g_prim_at, n_prim * 4, r)
                     // The owning mesh: VRM 0.x expression binds name a MESH and
                     // a target index, and a mesh becomes several flattened
                     // primitives when it is split by material.
-                    bytes.set_i32_le(g_prim_info, n_prim * 32, n_mesh)
+                    bytes.put_i32_le(g_prim_info, n_prim * 32, n_mesh)
                     n_prim = n_prim + 1
                     let after = skip_value(doc, r, jend)
                     var d = skip_ws(doc, after, jend)
-                    if d < jend and bytes.read_u8(doc, d) == COMMA then { d = d + 1 } else {}
+                    if d < jend and bytes.get(doc, d) ?? 0 == COMMA then { d = d + 1 } else {}
                     r = skip_ws(doc, d, jend)
                   }
                 }
@@ -380,7 +380,7 @@ fn index_document(doc: Bytes, jstart: Int, jend: Int) -> Int = {
             n_mesh = n_mesh + 1
             let after_mesh = skip_value(doc, q, jend)
             var e = skip_ws(doc, after_mesh, jend)
-            if e < jend and bytes.read_u8(doc, e) == COMMA then { e = e + 1 } else {}
+            if e < jend and bytes.get(doc, e) ?? 0 == COMMA then { e = e + 1 } else {}
             q = skip_ws(doc, e, jend)
           }
         }
@@ -394,13 +394,13 @@ fn index_document(doc: Bytes, jstart: Int, jend: Int) -> Int = {
 // ── Accessor resolution ──────────────────────────────────────────────────
 
 fn accessor_at(i: Int) -> Int =
-  if i < 0 or i >= accessor_count() then 0 - 1 else bytes.read_i32_le(g_acc_at, i * 4)
+  if i < 0 or i >= accessor_count() then 0 - 1 else bytes.get_i32_le(g_acc_at, i * 4) ?? 0
 
 fn view_at(i: Int) -> Int =
-  if i < 0 or i >= view_count() then 0 - 1 else bytes.read_i32_le(g_view_at, i * 4)
+  if i < 0 or i >= view_count() then 0 - 1 else bytes.get_i32_le(g_view_at, i * 4) ?? 0
 
 fn primitive_at(i: Int) -> Int =
-  if i < 0 or i >= primitive_count() then 0 - 1 else bytes.read_i32_le(g_prim_at, i * 4)
+  if i < 0 or i >= primitive_count() then 0 - 1 else bytes.get_i32_le(g_prim_at, i * 4) ?? 0
 
 /// Element count of accessor `i`.
 pub fn accessor_count_of(doc: Bytes, i: Int) -> Int = {
@@ -512,13 +512,13 @@ pub fn staged_accessor_stride(i: Int, packed: Int) -> Int = accessor_stride(g_fi
 
 pub fn vertex_ptr() -> Int = bytes.data_ptr(g_vtx)
 pub fn index_ptr() -> Int = bytes.data_ptr(g_idx)
-pub fn built_vertex_count() -> Int = bytes.read_i32_le(g_geo, 0)
-pub fn built_index_count() -> Int = bytes.read_i32_le(g_geo, 4)
+pub fn built_vertex_count() -> Int = bytes.get_i32_le(g_geo, 0) ?? 0
+pub fn built_index_count() -> Int = bytes.get_i32_le(g_geo, 4) ?? 0
 
 fn read_component(off: Int, comp: Int) -> Int =
-  if comp == COMP_U8 then bytes.read_u8(g_file, off)
-  else if comp == COMP_U16 then bytes.read_u16_le(g_file, off)
-  else bytes.read_u32_le(g_file, off)
+  if comp == COMP_U8 then bytes.get(g_file, off) ?? 0
+  else if comp == COMP_U16 then bytes.get_u16_le(g_file, off) ?? 0
+  else bytes.get_u32_le(g_file, off) ?? 0
 
 /// Append primitive `p`'s vertices and indices. Returns the vertices added, or
 /// -1 if it does not fit or has no positions.
@@ -563,9 +563,9 @@ fn append_primitive(p: Int) -> Int = {
         let d = (base_v + j) * VTX_STRIDE + 12
         if has_n then { bytes.copy_from(g_vtx, g_file, d, nrm_b + j * nrm_s, 12) }
         else {
-          bytes.set_f32_le(g_vtx, d, 0.0)
-          bytes.set_f32_le(g_vtx, d + 4, 1.0)
-          bytes.set_f32_le(g_vtx, d + 8, 0.0)
+          bytes.put_f32_le(g_vtx, d, 0.0)
+          bytes.put_f32_le(g_vtx, d + 4, 1.0)
+          bytes.put_f32_le(g_vtx, d + 8, 0.0)
         }
         j = j + 1
       }
@@ -574,8 +574,8 @@ fn append_primitive(p: Int) -> Int = {
         let d = (base_v + k) * VTX_STRIDE + 24
         if has_uv then { bytes.copy_from(g_vtx, g_file, d, uv_b + k * uv_s, 8) }
         else {
-          bytes.set_f32_le(g_vtx, d, 0.0)
-          bytes.set_f32_le(g_vtx, d + 4, 0.0)
+          bytes.put_f32_le(g_vtx, d, 0.0)
+          bytes.put_f32_le(g_vtx, d + 4, 0.0)
         }
         k = k + 1
       }
@@ -588,11 +588,11 @@ fn append_primitive(p: Int) -> Int = {
         {
           var k = 0
           while k < n {
-            bytes.set_u32_le(g_idx, (base_i + k) * 4, base_v + k)
+            bytes.put_u32_le(g_idx, (base_i + k) * 4, base_v + k)
             k = k + 1
           }
-          bytes.set_i32_le(g_geo, 0, base_v + n)
-          bytes.set_i32_le(g_geo, 4, base_i + n)
+          bytes.put_i32_le(g_geo, 0, base_v + n)
+          bytes.put_i32_le(g_geo, 4, base_i + n)
           record_primitive(p, base_v, n, base_i, n)
           n
         }
@@ -607,11 +607,11 @@ fn append_primitive(p: Int) -> Int = {
           var k = 0
           while k < ic {
             let v = read_component(ib + k * is, comp)
-            bytes.set_u32_le(g_idx, (base_i + k) * 4, base_v + v)
+            bytes.put_u32_le(g_idx, (base_i + k) * 4, base_v + v)
             k = k + 1
           }
-          bytes.set_i32_le(g_geo, 0, base_v + n)
-          bytes.set_i32_le(g_geo, 4, base_i + ic)
+          bytes.put_i32_le(g_geo, 0, base_v + n)
+          bytes.put_i32_le(g_geo, 4, base_i + ic)
           record_primitive(p, base_v, n, base_i, ic)
           n
         }
@@ -646,8 +646,8 @@ fn record_primitive(p: Int, first: Int, n: Int, first_index: Int, index_count: I
     let acc = target_position_accessor(p, nt)
     if acc < 0 then { more = false }
     else {
-      bytes.set_i32_le(g_target_acc, (p * MAX_TARGETS + nt) * 4, acc)
-      bytes.set_f32_le(g_target_w, (p * MAX_TARGETS + nt) * 4, 0.0)
+      bytes.put_i32_le(g_target_acc, (p * MAX_TARGETS + nt) * 4, acc)
+      bytes.put_f32_le(g_target_w, (p * MAX_TARGETS + nt) * 4, 0.0)
       nt = nt + 1
     }
   }
@@ -657,13 +657,13 @@ fn record_primitive(p: Int, first: Int, n: Int, first_index: Int, index_count: I
 /// Build every primitive of the opened model into one buffer pair. Returns the
 /// total vertex count, or -1 if any primitive did not fit.
 pub fn reset_geometry() -> Unit = {
-  bytes.set_i32_le(g_geo, 0, 0)
-  bytes.set_i32_le(g_geo, 4, 0)
+  bytes.put_i32_le(g_geo, 0, 0)
+  bytes.put_i32_le(g_geo, 4, 0)
 }
 
 pub fn build_all() -> Int = {
-  bytes.set_i32_le(g_geo, 0, 0)
-  bytes.set_i32_le(g_geo, 4, 0)
+  bytes.put_i32_le(g_geo, 0, 0)
+  bytes.put_i32_le(g_geo, 4, 0)
   let np = primitive_count()
   var p = 0
   var bad = false
@@ -680,18 +680,18 @@ pub fn compute_bounds() -> Unit = {
   let n = built_vertex_count()
   if n <= 0 then {}
   else {
-    var minx = bytes.read_f32_le(g_vtx, 0)
-    var miny = bytes.read_f32_le(g_vtx, 4)
-    var minz = bytes.read_f32_le(g_vtx, 8)
+    var minx = bytes.get_f32_le(g_vtx, 0) ?? 0.0
+    var miny = bytes.get_f32_le(g_vtx, 4) ?? 0.0
+    var minz = bytes.get_f32_le(g_vtx, 8) ?? 0.0
     var maxx = minx
     var maxy = miny
     var maxz = minz
     var i = 1
     while i < n {
       let o = i * VTX_STRIDE
-      let x = bytes.read_f32_le(g_vtx, o)
-      let y = bytes.read_f32_le(g_vtx, o + 4)
-      let z = bytes.read_f32_le(g_vtx, o + 8)
+      let x = bytes.get_f32_le(g_vtx, o) ?? 0.0
+      let y = bytes.get_f32_le(g_vtx, o + 4) ?? 0.0
+      let z = bytes.get_f32_le(g_vtx, o + 8) ?? 0.0
       if x < minx then { minx = x } else {}
       if y < miny then { miny = y } else {}
       if z < minz then { minz = z } else {}
@@ -700,27 +700,27 @@ pub fn compute_bounds() -> Unit = {
       if z > maxz then { maxz = z } else {}
       i = i + 1
     }
-    bytes.set_f32_le(g_bounds, 0, minx)
-    bytes.set_f32_le(g_bounds, 4, miny)
-    bytes.set_f32_le(g_bounds, 8, minz)
-    bytes.set_f32_le(g_bounds, 12, maxx)
-    bytes.set_f32_le(g_bounds, 16, maxy)
-    bytes.set_f32_le(g_bounds, 20, maxz)
+    bytes.put_f32_le(g_bounds, 0, minx)
+    bytes.put_f32_le(g_bounds, 4, miny)
+    bytes.put_f32_le(g_bounds, 8, minz)
+    bytes.put_f32_le(g_bounds, 12, maxx)
+    bytes.put_f32_le(g_bounds, 16, maxy)
+    bytes.put_f32_le(g_bounds, 20, maxz)
   }
 }
 
 pub fn bound_at(i: Int) -> Float =
-  if i < 0 or i >= 6 then 0.0 else bytes.read_f32_le(g_bounds, i * 4)
+  if i < 0 or i >= 6 then 0.0 else bytes.get_f32_le(g_bounds, i * 4) ?? 0.0
 
 /// Read back built geometry — what a test needs to check winding and index
 /// validity on a real model, not just on synthetic geometry.
 pub fn built_vertex_f32(i: Int, k: Int) -> Float =
   if i < 0 or i >= built_vertex_count() or k < 0 or k >= 8 then 0.0
-  else bytes.read_f32_le(g_vtx, i * VTX_STRIDE + k * 4)
+  else bytes.get_f32_le(g_vtx, i * VTX_STRIDE + k * 4) ?? 0.0
 
 pub fn built_index_at(i: Int) -> Int =
   if i < 0 or i >= built_index_count() then 0 - 1
-  else bytes.read_u32_le(g_idx, i * 4)
+  else bytes.get_u32_le(g_idx, i * 4) ?? 0
 
 // ── Morph targets ────────────────────────────────────────────────────────
 //
@@ -732,8 +732,8 @@ pub fn built_index_at(i: Int) -> Int =
 // `bytes.copy_from` in one body: that costs O(destination) per call
 // (almide/almide#946) and would put a 16 MiB copy inside a per-vertex loop.
 
-fn prim_info(p: Int, k: Int) -> Int = bytes.read_i32_le(g_prim_info, p * 32 + k * 4)
-fn set_prim_info(p: Int, k: Int, v: Int) -> Unit = bytes.set_i32_le(g_prim_info, p * 32 + k * 4, v)
+fn prim_info(p: Int, k: Int) -> Int = bytes.get_i32_le(g_prim_info, p * 32 + k * 4) ?? 0
+fn set_prim_info(p: Int, k: Int, v: Int) -> Unit = bytes.put_i32_le(g_prim_info, p * 32 + k * 4, v)
 
 pub fn primitive_mesh(p: Int) -> Int = prim_info(p, 0)
 pub fn primitive_first_vertex(p: Int) -> Int = prim_info(p, 1)
@@ -743,21 +743,21 @@ pub fn primitive_target_count(p: Int) -> Int = prim_info(p, 3)
 /// Position of element `i` of the array at `p`, or -1.
 pub fn elem(doc: Bytes, p: Int, i: Int, end: Int) -> Int = {
   var q = skip_ws(doc, p, end)
-  if q >= end or bytes.read_u8(doc, q) != LBRACKET then 0 - 1
+  if q >= end or (bytes.get(doc, q) ?? 0) != LBRACKET then 0 - 1
   else {
     q = skip_ws(doc, q + 1, end)
     var n = 0
     var found = 0 - 1
     var done = false
     while not done and q < end and found < 0 {
-      let b = bytes.read_u8(doc, q)
+      let b = bytes.get(doc, q) ?? 0
       if b == RBRACKET then { done = true }
       else if n == i then { found = q }
       else {
         n = n + 1
         let after = skip_value(doc, q, end)
         var d = skip_ws(doc, after, end)
-        if d < end and bytes.read_u8(doc, d) == COMMA then { d = d + 1 } else {}
+        if d < end and bytes.get(doc, d) ?? 0 == COMMA then { d = d + 1 } else {}
         q = skip_ws(doc, d, end)
       }
     }
@@ -782,16 +782,16 @@ fn target_position_accessor(p: Int, t: Int) -> Int = {
 
 pub fn target_weight(p: Int, t: Int) -> Float =
   if p < 0 or t < 0 or t >= MAX_TARGETS then 0.0
-  else bytes.read_f32_le(g_target_w, (p * MAX_TARGETS + t) * 4)
+  else bytes.get_f32_le(g_target_w, (p * MAX_TARGETS + t) * 4) ?? 0.0
 
 pub fn set_target_weight(p: Int, t: Int, w: Float) -> Unit =
   if p < 0 or p >= primitive_count() or t < 0 or t >= primitive_target_count(p) then {}
-  else bytes.set_f32_le(g_target_w, (p * MAX_TARGETS + t) * 4, w)
+  else bytes.put_f32_le(g_target_w, (p * MAX_TARGETS + t) * 4, w)
 
 pub fn clear_target_weights() -> Unit = {
   let n = primitive_count() * MAX_TARGETS
   var i = 0
-  while i < n { bytes.set_f32_le(g_target_w, i * 4, 0.0)  i = i + 1 }
+  while i < n { bytes.put_f32_le(g_target_w, i * 4, 0.0)  i = i + 1 }
 }
 
 /// Rewrite the positions of every primitive that has morph targets, from the
@@ -819,7 +819,7 @@ pub fn apply_morphs() -> Int = {
         let w = target_weight(p, t)
         if w <= 0.0001 and w >= 0.0 - 0.0001 then {}
         else {
-          let acc = bytes.read_i32_le(g_target_acc, (p * MAX_TARGETS + t) * 4)
+          let acc = bytes.get_i32_le(g_target_acc, (p * MAX_TARGETS + t) * 4) ?? 0
           if acc < 0 then {}
           else {
             let base_b = staged_accessor_base(acc)
@@ -831,22 +831,22 @@ pub fn apply_morphs() -> Int = {
             var kx = 0
             while kx < lim {
               let o = (first + kx) * VTX_STRIDE
-              bytes.set_f32_le(g_vtx, o, bytes.read_f32_le(g_vtx, o)
-                + w * bytes.read_f32_le(g_file, base_b + kx * stride))
+              bytes.put_f32_le(g_vtx, o, bytes.get_f32_le(g_vtx, o) ?? 0.0
+                + w * bytes.get_f32_le(g_file, base_b + kx * stride) ?? 0.0)
               kx = kx + 1
             }
             var ky = 0
             while ky < lim {
               let o = (first + ky) * VTX_STRIDE + 4
-              bytes.set_f32_le(g_vtx, o, bytes.read_f32_le(g_vtx, o)
-                + w * bytes.read_f32_le(g_file, base_b + ky * stride + 4))
+              bytes.put_f32_le(g_vtx, o, bytes.get_f32_le(g_vtx, o) ?? 0.0
+                + w * bytes.get_f32_le(g_file, base_b + ky * stride + 4) ?? 0.0)
               ky = ky + 1
             }
             var kz = 0
             while kz < lim {
               let o = (first + kz) * VTX_STRIDE + 8
-              bytes.set_f32_le(g_vtx, o, bytes.read_f32_le(g_vtx, o)
-                + w * bytes.read_f32_le(g_file, base_b + kz * stride + 8))
+              bytes.put_f32_le(g_vtx, o, bytes.get_f32_le(g_vtx, o) ?? 0.0
+                + w * bytes.get_f32_le(g_file, base_b + kz * stride + 8) ?? 0.0)
               kz = kz + 1
             }
           }
@@ -898,13 +898,13 @@ fn preset_code(name: String) -> Int =
 
 let EXPR_STRIDE = 200      // 2 ints + MAX_BINDS * 3 ints, in bytes
 
-pub fn expression_count() -> Int = bytes.read_i32_le(g_expr_n, 0)
+pub fn expression_count() -> Int = bytes.get_i32_le(g_expr_n, 0) ?? 0
 pub fn expression_preset(i: Int) -> Int =
   if i < 0 or i >= expression_count() then EXPR_UNKNOWN
-  else bytes.read_i32_le(g_expr, i * EXPR_STRIDE)
-fn expression_bind_count(i: Int) -> Int = bytes.read_i32_le(g_expr, i * EXPR_STRIDE + 4)
+  else bytes.get_i32_le(g_expr, i * EXPR_STRIDE) ?? 0
+fn expression_bind_count(i: Int) -> Int = bytes.get_i32_le(g_expr, i * EXPR_STRIDE + 4) ?? 0
 fn expression_bind(i: Int, b: Int, k: Int) -> Int =
-  bytes.read_i32_le(g_expr, i * EXPR_STRIDE + 8 + (b * 3 + k) * 4)
+  bytes.get_i32_le(g_expr, i * EXPR_STRIDE + 8 + (b * 3 + k) * 4) ?? 0
 
 /// The string value at `p` (its opening quote), as an Almide String.
 fn string_at(doc: Bytes, p: Int, end: Int) -> String = {
@@ -914,7 +914,7 @@ fn string_at(doc: Bytes, p: Int, end: Int) -> String = {
 
 /// Read the VRM 0.x expression groups. Returns how many were found.
 pub fn index_expressions() -> Int = {
-  bytes.set_i32_le(g_expr_n, 0, 0)
+  bytes.put_i32_le(g_expr_n, 0, 0)
   let jstart = count_at(3)
   let jend = jstart + count_at(4)
   let ext = field(g_file, jstart, jend, "extensions")
@@ -937,7 +937,7 @@ pub fn index_expressions() -> Int = {
             else {
               let np = field(g_file, gpos, jend, "presetName")
               let code = if np < 0 then EXPR_UNKNOWN else preset_code(string_at(g_file, np, jend))
-              bytes.set_i32_le(g_expr, n * EXPR_STRIDE, code)
+              bytes.put_i32_le(g_expr, n * EXPR_STRIDE, code)
               let binds = field(g_file, gpos, jend, "binds")
               var nb = 0
               if binds < 0 then {}
@@ -948,18 +948,18 @@ pub fn index_expressions() -> Int = {
                   if bpos < 0 then { bmore = false }
                   else {
                     let base = n * EXPR_STRIDE + 8 + nb * 12
-                    bytes.set_i32_le(g_expr, base, int_field(g_file, bpos, jend, "mesh", 0 - 1))
-                    bytes.set_i32_le(g_expr, base + 4, int_field(g_file, bpos, jend, "index", 0 - 1))
-                    bytes.set_i32_le(g_expr, base + 8, int_field(g_file, bpos, jend, "weight", 100))
+                    bytes.put_i32_le(g_expr, base, int_field(g_file, bpos, jend, "mesh", 0 - 1))
+                    bytes.put_i32_le(g_expr, base + 4, int_field(g_file, bpos, jend, "index", 0 - 1))
+                    bytes.put_i32_le(g_expr, base + 8, int_field(g_file, bpos, jend, "weight", 100))
                     nb = nb + 1
                   }
                 }
               }
-              bytes.set_i32_le(g_expr, n * EXPR_STRIDE + 4, nb)
+              bytes.put_i32_le(g_expr, n * EXPR_STRIDE + 4, nb)
               n = n + 1
             }
           }
-          bytes.set_i32_le(g_expr_n, 0, n)
+          bytes.put_i32_le(g_expr_n, 0, n)
           n
         }
       }
@@ -979,7 +979,7 @@ pub fn set_expression(i: Int, w: Float) -> Unit =
       let mesh = expression_bind(i, b, 0)
       let target = expression_bind(i, b, 1)
       let pct = expression_bind(i, b, 2)
-      let scaled = w * int.to_float(pct) / 100.0
+      let scaled = w * float.from(pct) / 100.0
       // A mesh becomes several flattened primitives when split by material;
       // every one of them carries the same target and must move together.
       var p = 0
@@ -1092,7 +1092,7 @@ pub fn image_ptr(i: Int) -> Int = {
   if off < 0 then 0 else bytes.data_ptr(g_file) + off
 }
 
-fn be16(off: Int) -> Int = bytes.read_u8(g_file, off) * 256 + bytes.read_u8(g_file, off + 1)
+fn be16(off: Int) -> Int = bytes.get(g_file, off) ?? 0 * 256 + bytes.get(g_file, off + 1) ?? 0
 fn be32(off: Int) -> Int = be16(off) * 65536 + be16(off + 2)
 
 /// Width and height read from the encoded header — PNG's IHDR, or JPEG's first
@@ -1104,19 +1104,19 @@ fn image_dim(i: Int, which: Int) -> Int = {
   let off = image_ptr_offset(i)
   let len = image_byte_length(i)
   if off < 0 or len < 24 then 0
-  else if bytes.read_u8(g_file, off) == 137 and bytes.read_u8(g_file, off + 1) == 80 then {
+  else if bytes.get(g_file, off) ?? 0 == 137 and bytes.get(g_file, off + 1) ?? 0 == 80 then {
     // PNG: 8-byte signature, then the IHDR chunk's length and type, then w, h.
     if which == 0 then be32(off + 16) else be32(off + 20)
   }
-  else if bytes.read_u8(g_file, off) == 255 and bytes.read_u8(g_file, off + 1) == 216 then {
+  else if bytes.get(g_file, off) ?? 0 == 255 and bytes.get(g_file, off + 1) ?? 0 == 216 then {
     // JPEG: walk the marker segments to the first SOF, which carries the size.
     var q = off + 2
     var found = 0
     var done = false
     while not done and q + 9 < off + len {
-      if bytes.read_u8(g_file, q) != 255 then { q = q + 1 }
+      if (bytes.get(g_file, q) ?? 0) != 255 then { q = q + 1 }
       else {
-        let m = bytes.read_u8(g_file, q + 1)
+        let m = bytes.get(g_file, q + 1) ?? 0
         // SOF0..SOF3 and SOF5..SOF15, skipping the non-frame markers in between.
         if (m >= 192 and m <= 195) or (m >= 197 and m <= 207 and m != 200 and m != 204) then {
           found = if which == 0 then be16(q + 7) else be16(q + 5)
