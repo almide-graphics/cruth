@@ -28,6 +28,8 @@
 // This is deliberately NOT a general JSON reader. It reads the shapes glTF
 // actually uses and says so when it meets anything else.
 
+import ffi
+
 // ── Scalars first: a module-level scalar declared after a heap `var` breaks
 //    cross-module linking (almide/almide#943). Keep this block at the top.
 
@@ -472,7 +474,7 @@ pub fn primitive_indices(doc: Bytes, p: Int) -> Int = {
 // ── Host staging ─────────────────────────────────────────────────────────
 
 /// Where the host writes the file before calling `open_staged`.
-pub fn file_ptr() -> Int = bytes.data_ptr(g_file)
+pub fn file_ptr() -> Int = ffi.to_int(ffi.address(g_file))
 
 /// Capacity of the staging arena, so a host can refuse an oversized file
 /// instead of overrunning it.
@@ -510,8 +512,8 @@ pub fn staged_accessor_stride(i: Int, packed: Int) -> Int = accessor_stride(g_fi
 // on compilers that do not yet carry its fix.
 
 
-pub fn vertex_ptr() -> Int = bytes.data_ptr(g_vtx)
-pub fn index_ptr() -> Int = bytes.data_ptr(g_idx)
+pub fn vertex_ptr() -> Int = ffi.to_int(ffi.address(g_vtx))
+pub fn index_ptr() -> Int = ffi.to_int(ffi.address(g_idx))
 pub fn built_vertex_count() -> Int = bytes.get_i32_le(g_geo, 0) ?? 0
 pub fn built_index_count() -> Int = bytes.get_i32_le(g_geo, 4) ?? 0
 
@@ -1089,7 +1091,7 @@ pub fn image_byte_length(i: Int) -> Int = {
 /// A pointer into linear memory at image `i`'s first encoded byte.
 pub fn image_ptr(i: Int) -> Int = {
   let off = image_ptr_offset(i)
-  if off < 0 then 0 else bytes.data_ptr(g_file) + off
+  if off < 0 then 0 else ffi.to_int(ffi.address(g_file)) + off
 }
 
 fn be16(off: Int) -> Int = bytes.get(g_file, off) ?? 0 * 256 + bytes.get(g_file, off + 1) ?? 0
