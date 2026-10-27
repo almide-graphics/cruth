@@ -265,7 +265,7 @@ pub fn int_field(doc: Bytes, p: Int, end: Int, key: String, dflt: Int) -> Int =
 
 /// Record the byte offset of every element of the array at `p` into `slots`,
 /// returning how many were recorded (or -1 if the arena is too small).
-fn index_array(doc: Bytes, p: Int, end: Int, slots: Bytes, cap: Int) -> Int = {
+fn index_array(doc: Bytes, p: Int, end: Int, mut slots: Bytes, cap: Int) -> Int = {
   var q = skip_ws(doc, p, end)
   if q >= end or (bytes.get(doc, q) ?? 0) != LBRACKET then 0
   else {
