@@ -27,9 +27,18 @@ const { instance } = await WebAssembly.instantiate(await readFile(WASM), {
 const ex = instance.exports;
 if (ex._start) { try { ex._start(); } catch { /* no main */ } }
 
+// Hand the file to the module as an Almide Bytes value ([len][cap][payload]);
+// a Bytes export parameter is the i32 address of that value.
+function almideBytes(u8) {
+  const val = Number(ex.__alloc(8 + u8.length));
+  const dv = new DataView(ex.memory.buffer);
+  dv.setInt32(val, u8.length, true); dv.setInt32(val + 4, u8.length, true);
+  new Uint8Array(ex.memory.buffer, val + 8, u8.length).set(u8);
+  return val;
+}
+
 const glb = await readFile(MODEL);
-new Uint8Array(ex.memory.buffer, Number(ex.file_ptr()), glb.length).set(glb);
-ex.open_staged(BigInt(glb.length));
+ex.open(almideBytes(glb));
   ex.build_all();
   ex.compute_bounds();
   ex.index_expressions();

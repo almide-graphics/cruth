@@ -42,15 +42,16 @@ and the tree it builds is the heap-element list shape whose concat is O(n²)
 
 ```almide
 import cruth
+import ffi
 
-// Stage the file into cruth's arena, then read it in place.
-let prims = cruth.open_staged(file_length)
+// Copy the file into cruth's arena, then read it in place.
+let prims = cruth.open(glb_bytes)
 let verts = cruth.build_all()
 cruth.compute_bounds()
 let exprs = cruth.index_expressions()
 
-// Upload however you like — cruth only hands out pointers.
-upload(cruth.vertex_ptr(), verts * 32, cruth.index_ptr(), cruth.built_index_count())
+// Upload however you like — cruth hands out ffi.Regions (base + length).
+upload(cruth.vertex_region(), verts * 32, cruth.index_region(), cruth.built_index_count())
 
 // Drive the face.
 cruth.clear_target_weights()

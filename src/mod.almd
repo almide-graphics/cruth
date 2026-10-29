@@ -85,7 +85,7 @@ let MAX_BINDS = 16
 var g_acc_at = bytes.zeros(16384)      // MAX_ACCESSORS * 4
 var g_view_at = bytes.zeros(16384)
 var g_prim_at = bytes.zeros(4096)      // MAX_PRIMS * 4
-// The file itself, staged by the host. Sized for the models this targets; a
+// The file itself, copied in by `open`. Sized for the models this targets; a
 // larger one is rejected rather than truncated.
 var g_file = bytes.zeros(33554432)
 // Built geometry, in the mesh pipeline's layout. Indices are u32 because a
@@ -473,14 +473,23 @@ pub fn primitive_indices(doc: Bytes, p: Int) -> Int = {
 
 // ── Host staging ─────────────────────────────────────────────────────────
 
-/// Where the host writes the file before calling `open_staged`.
-pub fn file_ptr() -> Int = ffi.to_int(ffi.address(g_file))
+/// Copy `doc` (a whole .glb) into the staging arena and open it. An address
+/// has no Int form (ADR-0031), so a host hands the file over as a Bytes value
+/// instead of writing into the arena itself.
+pub fn open(doc: Bytes) -> Int = {
+  let len = bytes.len(doc)
+  if len > bytes.len(g_file) then { set_count(7, ERR_TOO_LARGE)  0 - 1 }
+  else {
+    bytes.copy_from(g_file, doc, 0, 0, len)
+    open_glb(g_file, len)
+  }
+}
 
 /// Capacity of the staging arena, so a host can refuse an oversized file
 /// instead of overrunning it.
 pub fn file_capacity() -> Int = bytes.len(g_file)
 
-/// Open the `len` bytes the host staged.
+/// Re-open the first `len` bytes of the staging arena.
 pub fn open_staged(len: Int) -> Int =
   if len > bytes.len(g_file) then { set_count(7, ERR_TOO_LARGE)  0 - 1 }
   else open_glb(g_file, len)
@@ -507,13 +516,16 @@ pub fn staged_accessor_stride(i: Int, packed: Int) -> Int = accessor_stride(g_fi
 //
 // Every primitive of the model is appended into ONE vertex/index pair, in the
 // exact layout the mesh pipeline declares (pos3 nrm3 uv2, 32-byte stride), so
-// the upload is a straight copy out of linear memory. Only pointers cross the
-// module boundary — never a Bytes — which keeps this clear of almide/almide#943
-// on compilers that do not yet carry its fix.
+// the upload is a straight copy out of linear memory. The buffers are handed
+// out as `ffi.Region`s (ADR-0031): pass one straight to an `@extern` upload,
+// which receives its base and length. A Region is the whole buffer (its length
+// is the capacity); upload the first `built_vertex_count() * 32` /
+// `built_index_count() * 4` bytes. Take a fresh Region for every upload: a
+// Region keeps the buffer it was made from, so one held across
+// `build_all` / `apply_morphs` still shows the older contents.
 
-
-pub fn vertex_ptr() -> Int = ffi.to_int(ffi.address(g_vtx))
-pub fn index_ptr() -> Int = ffi.to_int(ffi.address(g_idx))
+pub fn vertex_region() -> Region = ffi.region(g_vtx)
+pub fn index_region() -> Region = ffi.region(g_idx)
 pub fn built_vertex_count() -> Int = bytes.get_i32_le(g_geo, 0) ?? 0
 pub fn built_index_count() -> Int = bytes.get_i32_le(g_geo, 4) ?? 0
 
@@ -1088,10 +1100,11 @@ pub fn image_byte_length(i: Int) -> Int = {
   }
 }
 
-/// A pointer into linear memory at image `i`'s first encoded byte.
-pub fn image_ptr(i: Int) -> Int = {
+/// Image `i`'s encoded bytes as a Region (a copy; empty when there is none).
+pub fn image_region(i: Int) -> Region = {
   let off = image_ptr_offset(i)
-  if off < 0 then 0 else ffi.to_int(ffi.address(g_file)) + off
+  if off < 0 then ffi.region(bytes.zeros(0))
+  else ffi.region(bytes.slice(g_file, off, off + image_byte_length(i)))
 }
 
 fn be16(off: Int) -> Int = bytes.get(g_file, off) ?? 0 * 256 + bytes.get(g_file, off + 1) ?? 0
