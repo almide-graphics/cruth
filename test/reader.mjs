@@ -76,11 +76,20 @@ function synthetic() {
   return { glb: out, gltf, binOffset: bh + 8 };
 }
 
+// Hand the file to the module as an Almide Bytes value ([len][cap][payload]);
+// a Bytes export parameter is the i32 address of that value.
+function almideBytes(u8) {
+  const val = Number(ex.__alloc(8 + u8.length));
+  const dv = new DataView(ex.memory.buffer);
+  dv.setInt32(val, u8.length, true); dv.setInt32(val + 4, u8.length, true);
+  new Uint8Array(ex.memory.buffer, val + 8, u8.length).set(u8);
+  return val;
+}
+
 function stage(glb) {
   const cap = Number(ex.file_capacity());
   if (glb.length > cap) throw new Error(`file ${glb.length} exceeds staging capacity ${cap}`);
-  new Uint8Array(ex.memory.buffer, Number(ex.file_ptr()), glb.length).set(glb);
-  return Number(ex.open_staged(BigInt(glb.length)));
+  return Number(ex.open(almideBytes(glb)));
 }
 
 // Everything the reader is asked, answered independently from the host's parse.
